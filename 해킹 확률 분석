@@ -1,0 +1,207 @@
+# -*- coding: utf-8 -*-
+"""
+비밀번호 무차별 대입 시뮬레이션 (통계 포스터 탐구용)
+- 어떤 조건(자릿수 n, 문자 종류 k)을 넣어도 평균 시도 횟수와 해독 시간이 산출됨
+- 작은 조건: 실제로 해시 대입을 돌려 측정 (실측)
+- 큰 조건: 내 컴퓨터의 측정 속도로 이론값 계산 (외삽)
+실행: python password_sim.py
+필요: Python 3.8+, (그래프용) matplotlib  ->  pip install matplotlib
+"""
+import hashlib, itertools, math, random, string, time, csv
+
+# ---------------- 문자 집합 ----------------
+DIGITS  = string.digits            # 10
+LOWER   = string.ascii_lowercase   # 26
+UPPER   = string.ascii_uppercase   # 26
+SPECIAL = string.punctuation       # 32
+
+# ---------------- 설문 기반 프리셋 ----------------
+# 길이: 9~11자 구간이 최다(33.9%) -> 대표값 10자
+# 문자: 사용률 상위 3개(숫자 85.5%, 소문자 66.9%, 특수문자 60.5%)
+PRESETS = {
+    "1": ("설문 최빈 패턴 (10자, 숫자+소문자+특수문자)", DIGITS + LOWER + SPECIAL, 10),
+    "2": ("설문 중앙값 구간 (8자, 숫자+소문자)",        DIGITS + LOWER,           8),
+    "3": ("취약 패턴 (6자, 숫자만)",                    DIGITS,                   6),
+    "4": ("권장 패턴 (12자, 숫자+대소문자+특수문자)",   DIGITS + LOWER + UPPER + SPECIAL, 12),
+}
+
+REAL_RUN_LIMIT = 3_000_000   # 경우의 수가 이 이하일 때만 실제 대입 실행
+
+# 공격 환경 가정 (초당 시도 횟수)
+SCENARIOS = {
+    "온라인 공격(가정 100회/초)": 100,
+    "이 PC 파이썬(실측)": None,           # 실측값으로 채움
+    "고성능 GPU 오프라인(가정 10^10회/초)": 1e10,
+}
+
+def fmt_time(sec):
+    if sec < 1e-3: return f"{sec*1e6:.1f}마이크로초"
+    if sec < 1:    return f"{sec*1000:.1f}밀리초"
+    units = [("초",60),("분",60),("시간",24),("일",365),("년",1000),("천년",1e18)]
+    v = sec
+    for name, div in units:
+        if v < div: return f"{v:,.1f}{name}"
+        v /= div
+    return f"{sec:.2e}초"
+
+# ---------------- 핵심 함수 ----------------
+def sha(s):
+    return hashlib.sha256(s.encode()).digest()
+
+def measure_speed(seconds=1.5):
+    """이 PC에서 1초에 몇 번 해시 비교를 하는지 측정"""
+    target = sha("zzzzzzzz")
+    cnt, t0 = 0, time.perf_counter()
+    for tup in itertools.product(string.ascii_lowercase, repeat=8):
+        sha("".join(tup)) == target
+        cnt += 1
+        if cnt % 20000 == 0 and time.perf_counter() - t0 > seconds:
+            break
+    return cnt / (time.perf_counter() - t0)
+
+def one_crack(charset, n):
+    """무작위 비밀번호 1개를 사전순으로 전부 대입해 찾을 때까지의 (시도 횟수, 시간)"""
+    pw = "".join(random.choice(charset) for _ in range(n))
+    target = sha(pw)
+    cnt, t0 = 0, time.perf_counter()
+    for tup in itertools.product(charset, repeat=n):
+        cnt += 1
+        if sha("".join(tup)) == target:
+            break
+    return cnt, time.perf_counter() - t0
+
+def simulate(charset, n, trials=10):
+    charset = "".join(dict.fromkeys(charset))   # 중복 제거
+    k = len(charset); N = k ** n
+    res = {"k": k, "n": n, "N": N, "theory_avg": (N + 1) / 2, "worst": N}
+    if N <= REAL_RUN_LIMIT:
+        runs = [one_crack(charset, n) for _ in range(trials)]
+        counts = [r[0] for r in runs]; times = [r[1] for r in runs]
+        res["real_avg_attempts"] = sum(counts) / trials
+        res["real_avg_time"] = sum(times) / trials
+        res["real_trials"] = trials
+    return res
+
+def report(title, charset, n, speed, trials=10):
+    r = simulate(charset, n, trials)
+    print("\n" + "=" * 62)
+    print(f"[{title}]")
+    print(f"문자 종류 k = {r['k']},  자릿수 n = {r['n']}")
+    print(f"전체 경우의 수  N = k^n = {r['N']:.3e}")
+    print(f"이론 평균 시도 횟수 (N+1)/2 = {r['theory_avg']:.3e}")
+    print(f"최악(마지막에 발견) 시도 횟수 = {r['worst']:.3e}")
+    if "real_avg_attempts" in r:
+        print(f"[실측] {r['real_trials']}회 반복 평균 시도 횟수 = {r['real_avg_attempts']:,.0f}"
+              f"  /  평균 소요 시간 = {fmt_time(r['real_avg_time'])}")
+        err = abs(r['real_avg_attempts'] - r['theory_avg']) / r['theory_avg'] * 100
+        print(f"       이론값과 오차 = {err:.1f}%")
+    else:
+        print("[실측] 경우의 수가 너무 커서 실제 실행 생략 -> 아래는 속도 기반 계산값")
+    print("-" * 62)
+    print(f"{'환경':<38}{'평균 시간':>12}{'최악 시간':>12}")
+    for name, v in SCENARIOS.items():
+        v = speed if v is None else v
+        print(f"{name:<38}{fmt_time(r['theory_avg']/v):>12}{fmt_time(r['worst']/v):>12}")
+    return r
+
+# ---------------- 개인정보(패턴) 공격 ----------------
+def personal_info_attack(trials=200):
+    """생일 8자리(YYYYMMDD) 비밀번호를 '날짜 후보만' 대입하는 사전 공격"""
+    import datetime
+    cands = []
+    d = datetime.date(1950, 1, 1)
+    while d <= datetime.date(2015, 12, 31):
+        cands.append(d.strftime("%Y%m%d")); d += datetime.timedelta(days=1)
+    counts = []
+    for _ in range(trials):
+        pw = random.choice(cands); target = sha(pw)
+        for i, c in enumerate(cands, 1):
+            if sha(c) == target:
+                counts.append(i); break
+    avg = sum(counts) / trials
+    print("\n" + "=" * 62)
+    print("[개인정보 기반 사전 공격: 생일 8자리 YYYYMMDD, 1950~2015년생]")
+    print(f"후보 수 = {len(cands):,}  vs  숫자 8자리 무작위 = {10**8:,}")
+    print(f"평균 시도 횟수(실측) = {avg:,.0f}  (이론 {(len(cands)+1)/2:,.0f})")
+    print(f"표본공간 축소 비율 = {10**8/len(cands):,.0f}배 작아짐")
+
+# ---------------- 자릿수별 실험 + 그래프 ----------------
+def experiment(speed, trials=5):
+    sets = [("숫자(k=10)", DIGITS), ("소문자(k=26)", LOWER), ("숫자+소문자(k=36)", DIGITS + LOWER)]
+    rows, series = [], {}
+    for label, cs in sets:
+        k = len(cs); xs, ys = [], []
+        for n in range(1, 9):
+            if k ** n > REAL_RUN_LIMIT: break
+            r = simulate(cs, n, trials)
+            xs.append(n); ys.append(r["real_avg_time"])
+            rows.append([label, k, n, r["N"], r["real_avg_attempts"], r["real_avg_time"]])
+            print(f"{label} n={n}: 평균 {r['real_avg_attempts']:,.0f}회, {fmt_time(r['real_avg_time'])}")
+        series[label] = (k, xs, ys)
+    with open("experiment_result.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f); w.writerow(["문자집합", "k", "n", "경우의수", "평균시도횟수", "평균시간(초)"]); w.writerows(rows)
+    print("-> experiment_result.csv 저장 완료")
+
+    # log10(시간) vs n 직선 기울기 (이론: log10 k)
+    print("\n[log10(시간) - n 직선 기울기 vs 이론 log10(k)]")
+    for label, (k, xs, ys) in series.items():
+        pts = [(x, math.log10(y)) for x, y in zip(xs, ys) if y > 0 and x >= 3]
+        if len(pts) >= 2:
+            mx = sum(p[0] for p in pts) / len(pts); my = sum(p[1] for p in pts) / len(pts)
+            slope = sum((x-mx)*(y-my) for x, y in pts) / sum((x-mx)**2 for x, _ in pts)
+            print(f"{label}: 실측 기울기 {slope:.3f}  /  이론 {math.log10(k):.3f}")
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+        for fn in ["Malgun Gothic", "AppleGothic", "NanumGothic"]:
+            if any(fn in f.name for f in font_manager.fontManager.ttflist):
+                plt.rcParams["font.family"] = fn; break
+        plt.rcParams["axes.unicode_minus"] = False
+        plt.figure(figsize=(7, 5))
+        for label, (k, xs, ys) in series.items():
+            plt.plot(xs, ys, "o-", label=label)
+        plt.yscale("log"); plt.xlabel("비밀번호 자릿수 n"); plt.ylabel("평균 해독 시간(초, 로그축)")
+        plt.title("자릿수·문자 종류별 평균 해독 시간"); plt.grid(True, which="both", alpha=0.3); plt.legend()
+        plt.tight_layout(); plt.savefig("experiment_graph.png", dpi=200)
+        print("-> experiment_graph.png 저장 완료")
+    except ImportError:
+        print("matplotlib이 없어 그래프는 생략 (pip install matplotlib)")
+
+# ---------------- 메뉴 ----------------
+def custom_input():
+    n = int(input("자릿수 n: "))
+    cs = ""
+    if input("숫자 포함? (y/n): ").lower() == "y": cs += DIGITS
+    if input("영어 소문자 포함? (y/n): ").lower() == "y": cs += LOWER
+    if input("영어 대문자 포함? (y/n): ").lower() == "y": cs += UPPER
+    if input("특수문자 포함? (y/n): ").lower() == "y": cs += SPECIAL
+    return cs, n
+
+def main():
+    print("이 PC의 대입 속도 측정 중... (약 2초)")
+    speed = measure_speed()
+    print(f"측정 속도: 초당 약 {speed:,.0f}회 (SHA-256 + 파이썬)")
+    while True:
+        print("\n===== 메뉴 =====")
+        for key, (name, _, _) in PRESETS.items():
+            print(f"{key}. {name}")
+        print("5. 직접 조건 입력 (자릿수/문자 종류)")
+        print("6. 자릿수별 실험 + 그래프 + CSV (k=10,26,36)")
+        print("7. 개인정보(생일) 사전 공격 시뮬레이션")
+        print("8. 프리셋 1~4 한 번에 비교")
+        print("0. 종료")
+        c = input("선택: ").strip()
+        if c in PRESETS:
+            name, cs, n = PRESETS[c]; report(name, cs, n, speed)
+        elif c == "5":
+            cs, n = custom_input()
+            if cs: report("사용자 지정", cs, n, speed)
+            else: print("문자 집합을 하나 이상 선택하세요.")
+        elif c == "6": experiment(speed)
+        elif c == "7": personal_info_attack()
+        elif c == "8":
+            for key, (name, cs, n) in PRESETS.items(): report(name, cs, n, speed)
+        elif c == "0": break
+
+if __name__ == "__main__":
+    main()
